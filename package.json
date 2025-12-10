@@ -1,15 +1,15 @@
 {
-  "name": "nadia-twilio-deepseek",
+  "name": "nadia-ai-server",
   "version": "1.0.0",
+  "description": "Nadia AI server for Twilio + DeepSeek",
   "main": "server.js",
-  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "ws": "^8.15.1",
+    "twilio": "^4.14.0",
     "express": "^4.18.2",
     "body-parser": "^1.20.2",
-    "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2",
-    "twilio": "^4.14.0",
-    "@twilio/voice-sdk": "^1.0.0"
+    "axios": "^1.6.3"
   }
 }
