@@ -1,96 +1,111 @@
-// server.js
+// server.js - Twilio + DeepSeek working version
+
+import http from "http";
 import express from "express";
 import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
 import fetch from "node-fetch";
 
-const { json, urlencoded } = bodyParser;
-
 const app = express();
-app.use(urlencoded({ extended: false }));
-app.use(json());
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 10000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 
-// -------------------- TwiML (HARD CODED WSS URL) --------------------
+// -------------------- TWIML ENDPOINT --------------------
 app.post("/twiml", (req, res) => {
-  const twiml = `
+  res.type("text/xml");
+  res.send(`
     <Response>
       <Start>
         <Stream url="wss://nadia-server.onrender.com/media" />
       </Start>
     </Response>
-  `;
-  res.type("text/xml").send(twiml);
+  `);
 });
 
-// -------------------- START SERVER BEFORE WS --------------------
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+// -------------------- HEALTH CHECK --------------------
+app.get("/", (req, res) => res.send("OK"));
+
+// -------------------- CREATE RAW HTTP SERVER (REQUIRED BY TWILIO) --------------------
+const server = http.createServer(app);
+
+// -------------------- CREATE WEBSOCKET SERVER --------------------
+const wss = new WebSocketServer({
+  noServer: true,        // <-- IMPORTANT FIX
+  path: "/media"
 });
 
-// -------------------- WEBSOCKET SERVER --------------------
-const wss = new WebSocketServer({ server, path: "/media" });
+// Handle upgrade manually (REQUIRED FOR TWILIO)
+server.on("upgrade", (req, socket, head) => {
+  if (req.url === "/media") {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+  } else {
+    socket.destroy();
+  }
+});
 
+// -------------------- WS CONNECTION --------------------
 wss.on("connection", (ws) => {
-  console.log("🎧 Twilio connected to /media");
+  console.log("🔌 Twilio WebSocket connected!");
 
-  sendDeepSeekAudio(ws, "Hello, Nadia AI speaking. I am listening.");
+  sendDeepSeekTTS(ws, "Hello, Nadia AI speaking. I'm listening.");
 
-  ws.on("message", async (msg) => {
+  ws.on("message", async (raw) => {
     try {
-      const data = JSON.parse(msg);
+      const data = JSON.parse(raw);
 
       if (data.event === "media") {
-        const audio = Buffer.from(data.media.payload, "base64");
-        const aiAudio = await getDeepSeekAudio(audio);
+        const inputAudio = Buffer.from(data.media.payload, "base64");
+        const aiAudio = await getDeepSeekAudio(inputAudio);
 
-        ws.send(
-          JSON.stringify({
-            event: "media",
-            media: { payload: aiAudio.toString("base64") },
-          })
-        );
+        ws.send(JSON.stringify({
+          event: "media",
+          media: { payload: aiAudio.toString("base64") }
+        }));
       }
 
       if (data.event === "stop") {
-        console.log("📴 Twilio ended stream");
+        console.log("🔚 Twilio ended stream");
         ws.close();
       }
-    } catch (err) {
-      console.error("WS handler error:", err);
+
+    } catch (e) {
+      console.error("WS message error:", e);
     }
   });
 });
 
-// -------------------- DEEPSEEK AUDIO FUNCTIONS --------------------
-async function getDeepSeekAudio(inputAudio) {
+// -------------------- DEEPSEEK AUDIO --------------------
+async function getDeepSeekAudio(input) {
   try {
-    const response = await fetch("https://api.deepseek.ai/v1/voice/stream", {
+    const resp = await fetch("https://api.deepseek.ai/v1/voice/stream", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
         "Content-Type": "application/octet-stream",
       },
-      body: inputAudio,
+      body: input,
     });
 
-    if (!response.ok) {
-      console.error("DeepSeek error:", await response.text());
-      return Buffer.alloc(320); // short silence
+    if (!resp.ok) {
+      console.error(await resp.text());
+      return Buffer.alloc(320);
     }
 
-    return Buffer.from(await response.arrayBuffer());
+    return Buffer.from(await resp.arrayBuffer());
   } catch (err) {
-    console.error("DeepSeek request failed:", err);
+    console.error("DeepSeek error:", err);
     return Buffer.alloc(320);
   }
 }
 
-async function sendDeepSeekAudio(ws, text) {
+async function sendDeepSeekTTS(ws, text) {
   try {
-    const response = await fetch("https://api.deepseek.ai/v1/tts", {
+    const resp = await fetch("https://api.deepseek.ai/v1/tts", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
@@ -99,17 +114,18 @@ async function sendDeepSeekAudio(ws, text) {
       body: JSON.stringify({ text, voice: "Nadia" }),
     });
 
-    if (!response.ok) return;
+    if (!resp.ok) return;
 
-    const audioBuf = Buffer.from(await response.arrayBuffer());
+    const audio = Buffer.from(await resp.arrayBuffer());
 
-    ws.send(
-      JSON.stringify({
-        event: "media",
-        media: { payload: audioBuf.toString("base64") },
-      })
-    );
+    ws.send(JSON.stringify({
+      event: "media",
+      media: { payload: audio.toString("base64") }
+    }));
   } catch (err) {
-    console.error("DeepSeek TTS error:", err);
+    console.error("TTS error:", err);
   }
 }
+
+// -------------------- START SERVER --------------------
+server.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
