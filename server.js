@@ -1,31 +1,37 @@
 // server.js
 import express from "express";
-import http from "http";
 import { WebSocketServer } from "ws";
 import bodyParser from "body-parser";
+import fetch from "node-fetch"; // for DeepSeek API requests
+import { createServer } from "http";
 
-// Replace this with your actual DeepSeek SDK import
-// import DeepSeek from "deepseek-sdk"; 
+// Config
+const PORT = process.env.PORT || 10000;
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY; // put your DeepSeek key in Render env variables
 
+if (!DEEPSEEK_API_KEY) {
+  console.error("Missing DEEPSEEK_API_KEY environment variable!");
+  process.exit(1);
+}
+
+// Create Express App
 const app = express();
-const server = http.createServer(app);
+app.use(bodyParser.json());
 
-// Parse application/x-www-form-urlencoded for Twilio
-app.use(bodyParser.urlencoded({ extended: false }));
+// HTTP server for WebSocket upgrade
+const server = createServer(app);
 
-// TwiML endpoint for incoming calls
+// TwiML endpoint for Twilio Calls
 app.post("/twiml", (req, res) => {
-  const twimlResponse = `
-    <?xml version="1.0" encoding="UTF-8"?>
+  const twiml = `
     <Response>
       <Say>Hello! Nadia AI speaking. Connecting you now...</Say>
       <Start>
-        <Stream url="wss://${req.headers.host}/media"/>
+        <Stream url="wss://${req.headers.host}/media" />
       </Start>
     </Response>
   `;
-  res.type("text/xml");
-  res.send(twimlResponse);
+  res.type("text/xml").send(twiml);
 });
 
 // WebSocket server for Twilio Media Stream
@@ -34,37 +40,53 @@ const wss = new WebSocketServer({ server, path: "/media" });
 wss.on("connection", (ws) => {
   console.log("📡 Twilio Media Stream connected");
 
-  // Initialize your DeepSeek session here
-  // const deepSeekSession = new DeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
-
   ws.on("message", async (message) => {
-    // Twilio sends JSON messages over WebSocket
-    const msg = JSON.parse(message);
+    const msg = JSON.parse(message.toString());
 
-    if (msg.event === "start") {
-      console.log("Call started");
-      // You can send initial instructions to DeepSeek if needed
-    } else if (msg.event === "media") {
-      // The audio payload is base64 encoded PCM
+    // Only handle real-time speech payloads
+    if (msg.event === "media") {
       const audioBase64 = msg.media.payload;
 
-      // TODO: Send audioBase64 to DeepSeek API for transcription/response
-      // const responseAudio = await deepSeekSession.processAudio(audioBase64);
+      // Call DeepSeek API to process & respond
+      try {
+        const response = await fetch("https://api.deepseek.ai/v1/speech-to-speech", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            input_audio: audioBase64,
+            voice: "Nadia", // choose your DeepSeek voice
+            output_format: "wav"
+          }),
+        });
 
-      // For now, just log received media size
-      console.log(`Received audio chunk: ${audioBase64.length} bytes`);
+        const data = await response.json();
 
-      // TODO: Optionally send audio back to Twilio if DeepSeek returns audio
-      // ws.send(JSON.stringify({ event: "media", media: { payload: responseAudio } }));
-    } else if (msg.event === "stop") {
+        if (data.audio_base64) {
+          // Send back DeepSeek audio to Twilio
+          ws.send(JSON.stringify({
+            event: "media",
+            media: {
+              payload: data.audio_base64
+            }
+          }));
+        }
+      } catch (err) {
+        console.error("DeepSeek API error:", err);
+      }
+    }
+
+    // Handle call end
+    if (msg.event === "stop") {
       console.log("Call ended");
-      // Clean up DeepSeek session if needed
-      // deepSeekSession.close();
+      ws.close();
     }
   });
 
   ws.on("close", () => {
-    console.log("WebSocket disconnected");
+    console.log("📴 Twilio Media Stream disconnected");
   });
 
   ws.on("error", (err) => {
@@ -72,8 +94,7 @@ wss.on("connection", (ws) => {
   });
 });
 
-// Start HTTP server
-const PORT = process.env.PORT || 10000;
+// Start server
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
