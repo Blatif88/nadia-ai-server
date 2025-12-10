@@ -1,72 +1,42 @@
-import express from "express";
-import twilio from 'twilio';
-import bodyParser from 'body-parser';
+// server.js
+import express from 'express';
+import pkg from 'twilio';
+const { twiml: TwilioTwiML } = pkg;
 
-const { urlencoded } = bodyParser;
-const { twiml: TwilioTwiML } = twilio;
 const app = express();
-const PORT = process.env.PORT || 10000;
 
-// Twilio sends POST requests with urlencoded body
-app.use(urlencoded({ extended: false }));
+// Middleware to parse POST data from Twilio
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-// TwiML route for Twilio to get call instructions
-app.post("/twiml", (req, res) => {
-  const twiml = new VoiceResponse();
-
-  // Say something to the caller
-  twiml.say("Hello! Nadia AI is now online. Connecting you to AI voice...");
-
-  // Start Media Stream to your server
-  twiml.start().stream({
-    url: "wss://nadia-server.onrender.com/voice-stream" // WebSocket endpoint
-  });
-
-  res.type("text/xml");
-  res.send(twiml.toString());
+// Health check route
+app.get('/', (req, res) => {
+  res.send('Nadia DeepSeek-Twilio Server Running');
 });
 
-// Optional GET route to test in browser
-app.get("/twiml", (req, res) => {
-  const twiml = new VoiceResponse();
-  twiml.say("Hello! This is Nadia AI. You are visiting the TwiML endpoint.");
-  res.type("text/xml");
-  res.send(twiml.toString());
-});
+// TwiML endpoint for Twilio calls
+app.post('/twiml', (req, res) => {
+  try {
+    // Log incoming request from Twilio
+    console.log('Incoming request body:', req.body);
 
-// Example WebSocket endpoint for media stream
-// You need a WebSocket server to receive audio events
-import { WebSocketServer } from "ws";
-const wss = new WebSocketServer({ noServer: true });
+    // Create TwiML response
+    const response = new TwilioTwiML.VoiceResponse();
 
-wss.on("connection", (ws) => {
-  console.log("Media Stream connected");
+    // Say a message (Nadia speaking)
+    response.say('Hello! Nadia AI speaking. How can I assist you today?', { voice: 'alice' });
 
-  ws.on("message", (message) => {
-    // message is a JSON event with audio chunks
-    const data = JSON.parse(message);
-    console.log("Received audio event:", data.event);
-    // Here you can process the audio (e.g., send to AI)
-  });
-
-  ws.on("close", () => {
-    console.log("Media Stream disconnected");
-  });
-});
-
-// Upgrade HTTP server to handle WebSocket
-import http from "http";
-const server = http.createServer(app);
-server.on("upgrade", (request, socket, head) => {
-  if (request.url === "/voice-stream") {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request);
-    });
-  } else {
-    socket.destroy();
+    // Respond with XML
+    res.type('text/xml');
+    res.send(response.toString());
+  } catch (err) {
+    console.error('Error generating TwiML:', err);
+    res.status(500).send('Internal Server Error');
   }
 });
 
-server.listen(PORT, () => {
+// Start server
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
