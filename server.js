@@ -1,23 +1,21 @@
+// server.js
 import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
 import bodyParser from "body-parser";
-import { createServer } from "http";
-import WebSocket from "ws";
 
-const PORT = process.env.PORT || 10000;
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
-const DEEPSEEK_URL = "wss://api.deepseek.ai/stream"; // replace with your real endpoint
-
-if (!DEEPSEEK_API_KEY) {
-  console.error("DEEPSEEK_API_KEY is missing!");
-  process.exit(1);
-}
+// Replace this with your actual DeepSeek SDK import
+// import DeepSeek from "deepseek-sdk"; 
 
 const app = express();
+const server = http.createServer(app);
+
+// Parse application/x-www-form-urlencoded for Twilio
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// Twilio incoming call webhook
+// TwiML endpoint for incoming calls
 app.post("/twiml", (req, res) => {
-  const twiml = `
+  const twimlResponse = `
     <?xml version="1.0" encoding="UTF-8"?>
     <Response>
       <Say>Hello! Nadia AI speaking. Connecting you now...</Say>
@@ -26,44 +24,56 @@ app.post("/twiml", (req, res) => {
       </Start>
     </Response>
   `;
-  res.type("text/xml").send(twiml);
+  res.type("text/xml");
+  res.send(twimlResponse);
 });
 
-// HTTP + WebSocket server
-const server = createServer(app);
-const wss = new WebSocket.Server({ server, path: "/media" });
+// WebSocket server for Twilio Media Stream
+const wss = new WebSocketServer({ server, path: "/media" });
 
-wss.on("connection", (twilioWs) => {
+wss.on("connection", (ws) => {
   console.log("📡 Twilio Media Stream connected");
 
-  // Open DeepSeek WebSocket
-  const deepSeekWs = new WebSocket(`${DEEPSEEK_URL}?api_key=${DEEPSEEK_API_KEY}`);
+  // Initialize your DeepSeek session here
+  // const deepSeekSession = new DeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
 
-  deepSeekWs.on("open", () => {
-    console.log("✅ Connected to DeepSeek, ready to forward audio");
-  });
+  ws.on("message", async (message) => {
+    // Twilio sends JSON messages over WebSocket
+    const msg = JSON.parse(message);
 
-  deepSeekWs.on("message", (msg) => {
-    // Here you could process DeepSeek responses and optionally send back to Twilio
-    console.log("DeepSeek message:", msg.toString());
-  });
+    if (msg.event === "start") {
+      console.log("Call started");
+      // You can send initial instructions to DeepSeek if needed
+    } else if (msg.event === "media") {
+      // The audio payload is base64 encoded PCM
+      const audioBase64 = msg.media.payload;
 
-  deepSeekWs.on("close", () => console.log("DeepSeek connection closed"));
-  deepSeekWs.on("error", (err) => console.error("DeepSeek error:", err));
+      // TODO: Send audioBase64 to DeepSeek API for transcription/response
+      // const responseAudio = await deepSeekSession.processAudio(audioBase64);
 
-  twilioWs.on("message", (msg) => {
-    // Forward audio chunks to DeepSeek
-    if (deepSeekWs.readyState === WebSocket.OPEN) {
-      deepSeekWs.send(msg);
+      // For now, just log received media size
+      console.log(`Received audio chunk: ${audioBase64.length} bytes`);
+
+      // TODO: Optionally send audio back to Twilio if DeepSeek returns audio
+      // ws.send(JSON.stringify({ event: "media", media: { payload: responseAudio } }));
+    } else if (msg.event === "stop") {
+      console.log("Call ended");
+      // Clean up DeepSeek session if needed
+      // deepSeekSession.close();
     }
   });
 
-  twilioWs.on("close", () => {
-    console.log("Call ended");
-    if (deepSeekWs.readyState === WebSocket.OPEN) deepSeekWs.close();
+  ws.on("close", () => {
+    console.log("WebSocket disconnected");
   });
 
-  twilioWs.on("error", (err) => console.error("Twilio WS error:", err));
+  ws.on("error", (err) => {
+    console.error("WebSocket error:", err);
+  });
 });
 
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// Start HTTP server
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
