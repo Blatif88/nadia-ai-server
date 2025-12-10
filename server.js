@@ -1,7 +1,8 @@
 import express from "express";
-import { urlencoded } from "body-parser";
 import twilio from 'twilio';
+import bodyParser from 'body-parser';
 
+const { urlencoded } = bodyParser;
 const { twiml: TwilioTwiML } = twilio;
 const app = express();
 const PORT = process.env.PORT || 10000;
