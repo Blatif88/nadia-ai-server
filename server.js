@@ -18,8 +18,6 @@ app.post("/twiml", (req, res) => {
   // Example: say something
   voiceResponse.say("Hello, this is Nadia AI. Your call is being connected.");
 
-  // Optional: add more instructions (e.g., <Start> for Media Streams)
-
   res.type("text/xml");
   res.send(voiceResponse.toString());
 });
