@@ -2,8 +2,7 @@
 import express from "express";
 import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
-import fetch from "node-fetch"; // for DeepSeek API
-import fs from "fs";
+import fetch from "node-fetch";
 
 const { json, urlencoded } = bodyParser;
 
@@ -14,101 +13,103 @@ app.use(json());
 const PORT = process.env.PORT || 10000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 
-// -------------------- TwiML Endpoint --------------------
+// -------------------- TwiML (HARD CODED WSS URL) --------------------
 app.post("/twiml", (req, res) => {
   const twiml = `
     <Response>
       <Start>
-        <Stream url="wss://${req.headers.host}/media" />
+        <Stream url="wss://nadia-server.onrender.com/media" />
       </Start>
     </Response>
   `;
-  res.type("text/xml");
-  res.send(twiml);
+  res.type("text/xml").send(twiml);
 });
 
-// -------------------- WebSocket for Media Stream --------------------
+// -------------------- START SERVER BEFORE WS --------------------
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
 
+// -------------------- WEBSOCKET SERVER --------------------
 const wss = new WebSocketServer({ server, path: "/media" });
 
 wss.on("connection", (ws) => {
-  console.log("🎧 Twilio Media Stream connected");
+  console.log("🎧 Twilio connected to /media");
 
-  // Send initial greeting
-  sendDeepSeekAudio(ws, "Hello, Nadia AI speaking. Connecting you now.");
+  sendDeepSeekAudio(ws, "Hello, Nadia AI speaking. I am listening.");
 
-  ws.on("message", async (message) => {
+  ws.on("message", async (msg) => {
     try {
-      const data = JSON.parse(message.toString());
+      const data = JSON.parse(msg);
 
       if (data.event === "media") {
-        const audioChunk = Buffer.from(data.media.payload, "base64");
+        const audio = Buffer.from(data.media.payload, "base64");
+        const aiAudio = await getDeepSeekAudio(audio);
 
-        // Send to DeepSeek
-        const aiAudio = await getDeepSeekResponse(audioChunk);
-
-        ws.send(JSON.stringify({
-          event: "media",
-          media: {
-            payload: aiAudio.toString("base64")
-          }
-        }));
+        ws.send(
+          JSON.stringify({
+            event: "media",
+            media: { payload: aiAudio.toString("base64") },
+          })
+        );
       }
 
       if (data.event === "stop") {
-        console.log("📴 Call ended by Twilio");
+        console.log("📴 Twilio ended stream");
         ws.close();
       }
-
     } catch (err) {
-      console.error("Error handling Twilio media:", err);
+      console.error("WS handler error:", err);
     }
   });
 });
 
-// -------------------- DeepSeek Functions --------------------
-async function getDeepSeekResponse(inputAudioBuffer) {
-  // Example using DeepSeek TTS / Voice Conversion API
-  const response = await fetch("https://api.deepseek.ai/v1/voice/stream", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
-      "Content-Type": "application/octet-stream"
-    },
-    body: inputAudioBuffer
-  });
+// -------------------- DEEPSEEK AUDIO FUNCTIONS --------------------
+async function getDeepSeekAudio(inputAudio) {
+  try {
+    const response = await fetch("https://api.deepseek.ai/v1/voice/stream", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        "Content-Type": "application/octet-stream",
+      },
+      body: inputAudio,
+    });
 
-  if (!response.ok) {
-    console.error("DeepSeek API error:", await response.text());
-    return Buffer.alloc(16000 * 2); // 1s PCM16 silence at 16kHz
+    if (!response.ok) {
+      console.error("DeepSeek error:", await response.text());
+      return Buffer.alloc(320); // short silence
+    }
+
+    return Buffer.from(await response.arrayBuffer());
+  } catch (err) {
+    console.error("DeepSeek request failed:", err);
+    return Buffer.alloc(320);
   }
-
-  return Buffer.from(await response.arrayBuffer());
 }
 
 async function sendDeepSeekAudio(ws, text) {
-  const response = await fetch("https://api.deepseek.ai/v1/tts", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ text, voice: "Nadia" })
-  });
+  try {
+    const response = await fetch("https://api.deepseek.ai/v1/tts", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text, voice: "Nadia" }),
+    });
 
-  if (!response.ok) {
-    console.error("DeepSeek TTS error:", await response.text());
-    return;
+    if (!response.ok) return;
+
+    const audioBuf = Buffer.from(await response.arrayBuffer());
+
+    ws.send(
+      JSON.stringify({
+        event: "media",
+        media: { payload: audioBuf.toString("base64") },
+      })
+    );
+  } catch (err) {
+    console.error("DeepSeek TTS error:", err);
   }
-
-  const audioArrayBuffer = await response.arrayBuffer();
-  const audioBuffer = Buffer.from(audioArrayBuffer);
-
-  ws.send(JSON.stringify({
-    event: "media",
-    media: { payload: audioBuffer.toString("base64") }
-  }));
 }
