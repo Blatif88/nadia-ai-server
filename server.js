@@ -1,9 +1,11 @@
 // server.js
 import express from "express";
-import { json, urlencoded } from "body-parser";
+import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
 import fetch from "node-fetch"; // for DeepSeek API
 import fs from "fs";
+
+const { json, urlencoded } = bodyParser;
 
 const app = express();
 app.use(urlencoded({ extended: false }));
@@ -70,7 +72,6 @@ wss.on("connection", (ws) => {
 // -------------------- DeepSeek Functions --------------------
 async function getDeepSeekResponse(inputAudioBuffer) {
   // Example using DeepSeek TTS / Voice Conversion API
-  // Make sure the endpoint matches your DeepSeek API plan
   const response = await fetch("https://api.deepseek.ai/v1/voice/stream", {
     method: "POST",
     headers: {
@@ -82,7 +83,6 @@ async function getDeepSeekResponse(inputAudioBuffer) {
 
   if (!response.ok) {
     console.error("DeepSeek API error:", await response.text());
-    // Return silence on error
     return Buffer.alloc(16000 * 2); // 1s PCM16 silence at 16kHz
   }
 
