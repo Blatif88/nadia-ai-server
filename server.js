@@ -1,105 +1,158 @@
 import express from 'express';
 import pkg from 'body-parser';
 const { json, urlencoded } = pkg;
+import http from 'http';
 import { WebSocketServer } from 'ws';
-import dotenv from 'dotenv';
-import WebSocket from 'ws';
-import fetch from 'node-fetch';
-
-dotenv.config();
+import OpenAI from 'openai';
+import { spawn } from 'child_process';
+import { Readable } from 'stream';
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+
 app.use(json());
 app.use(urlencoded({ extended: true }));
 
-const PORT = process.env.PORT || 10000;
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- Health check ---
-app.get('/', (req, res) => {
-  res.send('🚀 Nadia DeepSeek-Twilio Server Running');
-});
-
-// --- Twilio webhook: start media stream ---
+// Twilio webhook
 app.post('/twiml', (req, res) => {
-  res.set('Content-Type', 'text/xml');
-  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Hello! Nadia AI speaking. Connecting you now...</Say>
   <Start>
     <Stream url="wss://${req.headers.host}/media"/>
   </Start>
-</Response>`);
+</Response>`;
+  res.type('text/xml');
+  res.send(twiml);
 });
 
-// --- WebSocket server for Twilio Media Streams ---
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+const server = http.createServer(app);
 
+// WebSocket server for Twilio Media Streams
 const wss = new WebSocketServer({ server, path: '/media' });
 
-wss.on('connection', (twilioWs) => {
+wss.on('connection', (ws) => {
   console.log('📡 Twilio Media Stream connected');
+  ws.isAlive = true;
 
-  // OpenAI Realtime WebSocket
-  const openaiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
-    headers: {
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-      'OpenAI-Beta': 'realtime=v1'
-    }
-  });
+  ws.on('pong', () => ws.isAlive = true);
 
-  openaiWs.on('open', () => {
-    console.log('🌐 Connected to OpenAI Realtime');
-  });
+  let audioBuffer = [];
 
-  openaiWs.on('message', (msg) => {
-    const data = JSON.parse(msg.toString());
+  ws.on('message', async (msg) => {
+    try {
+      const data = JSON.parse(msg);
 
-    // Forward AI's speech to Twilio
-    if (data.type === 'audio_chunk') {
-      twilioWs.send(JSON.stringify({
-        event: 'media',
-        media: {
-          payload: data.data // already base64-encoded audio from OpenAI
+      if (data.event === 'start') console.log('Call started');
+      if (data.event === 'stop') console.log('Call ended');
+
+      if (data.event === 'media' && data.media && data.media.payload) {
+        // Collect incoming audio
+        const chunk = Buffer.from(data.media.payload, 'base64');
+        audioBuffer.push(chunk);
+
+        // If enough audio collected, process it (you can adjust size for real-time)
+        if (audioBuffer.length >= 50) {
+          const fullAudio = Buffer.concat(audioBuffer);
+          audioBuffer = [];
+
+          // Convert PCM16 8kHz mono from Twilio to WAV for OpenAI
+          const ffmpeg = spawn('ffmpeg', [
+            '-f', 's16le',
+            '-ar', '8000',
+            '-ac', '1',
+            '-i', 'pipe:0',
+            '-f', 'wav',
+            'pipe:1'
+          ]);
+          const wavChunks = [];
+          ffmpeg.stdout.on('data', (chunk) => wavChunks.push(chunk));
+          ffmpeg.stdin.write(fullAudio);
+          ffmpeg.stdin.end();
+
+          ffmpeg.on('close', async () => {
+            const wavBuffer = Buffer.concat(wavChunks);
+
+            // Transcribe with OpenAI Whisper
+            const transcription = await openai.audio.transcriptions.create({
+              file: wavBuffer,
+              model: 'whisper-1'
+            });
+
+            const userText = transcription.text;
+            console.log('Caller said:', userText);
+
+            // Generate AI reply
+            const gptResponse = await openai.chat.completions.create({
+              model: 'gpt-4o-mini',
+              messages: [
+                { role: 'system', content: 'You are Nadia AI, helpful and friendly.' },
+                { role: 'user', content: userText }
+              ]
+            });
+
+            const replyText = gptResponse.choices[0].message.content;
+            console.log('Nadia replies:', replyText);
+
+            // Generate TTS audio
+            const ttsStream = await openai.audio.speech.create({
+              model: 'gpt-4o-mini-tts',
+              voice: 'alloy',
+              input: replyText
+            });
+
+            const ttsChunks = [];
+            for await (const chunk of ttsStream) ttsChunks.push(chunk);
+            const ttsBuffer = Buffer.concat(ttsChunks);
+
+            // Convert TTS to Twilio PCM16 8kHz mono
+            const ffmpeg2 = spawn('ffmpeg', [
+              '-i', 'pipe:0',
+              '-ar', '8000',
+              '-ac', '1',
+              '-f', 's16le',
+              'pipe:1'
+            ]);
+
+            const pcmChunks = [];
+            ffmpeg2.stdout.on('data', (chunk) => pcmChunks.push(chunk));
+            ffmpeg2.stdin.write(ttsBuffer);
+            ffmpeg2.stdin.end();
+
+            ffmpeg2.on('close', () => {
+              const pcmData = Buffer.concat(pcmChunks);
+              const base64Audio = pcmData.toString('base64');
+
+              if (ws.readyState === ws.OPEN) {
+                ws.send(JSON.stringify({
+                  event: 'media',
+                  media: { payload: base64Audio }
+                }));
+              }
+            });
+          });
         }
-      }));
-    }
-
-    if (data.type === 'message' && data.role === 'assistant') {
-      console.log('AI text:', data.content);
+      }
+    } catch (err) {
+      console.error('WebSocket message error:', err);
     }
   });
 
-  twilioWs.on('message', (msg) => {
-    const data = JSON.parse(msg);
+  ws.on('close', () => console.log('Twilio Media Stream disconnected'));
+  ws.on('error', (err) => console.error('WebSocket error:', err));
+});
 
-    // Twilio sends audio in base64 format
-    if (data.event === 'media') {
-      const audioBase64 = data.media.payload;
-
-      // Send audio chunk to OpenAI Realtime
-      openaiWs.send(JSON.stringify({
-        type: 'input_audio_buffer.append',
-        audio: audioBase64
-      }));
-
-      // Optionally finalize chunk
-      openaiWs.send(JSON.stringify({
-        type: 'input_audio_buffer.commit'
-      }));
-
-      // Request AI to respond
-      openaiWs.send(JSON.stringify({ type: 'response.create' }));
-    }
-
-    if (data.event === 'start') console.log('Call started');
-    if (data.event === 'stop') {
-      console.log('Call ended');
-      twilioWs.close();
-      openaiWs.close();
-    }
+// Ping clients to keep connection alive
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping(() => {});
   });
+}, 30000);
 
-  twilioWs.on('close', () => console.log('📴 Twilio Media Stream disconnected'));
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
